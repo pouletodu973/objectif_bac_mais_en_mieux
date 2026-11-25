@@ -1,0 +1,301 @@
+image: python:3.12-alpine
+
+preparer-pages:
+  stage: build
+  script:
+    - mkdir -p public
+    - python -m zipfile -e objectif-bac-v62-pages.zip public
+    - mv public/test-navigation.cjs test-navigation.cjs
+    - cp suivi.js public/
+    - |
+      python - public/index.html <<'PY'
+      from pathlib import Path
+      import sys
+
+      path = Path(sys.argv[1])
+      html = path.read_text(encoding="utf-8")
+
+      def replace(old, new):
+          global html
+          assert html.count(old) == 1, old
+          html = html.replace(old, new, 1)
+
+      replace("""  if(!pupil.activity52){""", """  const previous=pupil.activity52;
+        if(!previous?.days||!previous.red||!Number.isFinite(previous.total)
+          ||(previous.total===0&&Object.keys(previous.days).length===0&&Object.keys(pupil.progress||{}).length)){
+          const savedRed=previous?.red||{};""")
+      replace("const state={days:{},total:0,red:{}};","const state={days:{},total:0,red:{...savedRed}};")
+      replace("""  const pupil=profile(),state=activity52(pupil);
+        const starRedBefore""","""  const pupil=profile(),state=mergeActivity52(pupil,savedActivity52().find(p=>p.id===pupil.id)?.activity52);
+        const starRedBefore""")
+      replace("""  if(award){
+          for(const chapter of DATA.chapters){""","""  if(award||!state.rewardsReconciled){
+          for(const chapter of DATA.chapters){""")
+      replace("""  const yellow=Math.floor(state.total/10),red=Object.keys(state.red).length;""","""  state.rewardsReconciled=true;
+        const yellow=Math.floor(state.total/10),red=Object.keys(state.red).length;""")
+      replace("  <h3>Ton pseudo et tes résultats</h3>", """  <h3>Nouveautés de la V6.2</h3>
+        <p>Le tutoriel, le mode sombre et la barre de progression quotidienne accompagnent les séances. Les QCM permettent un deuxième essai. Les indices donnent une relation, une notion ou une première étape.</p>
+        <p>Les étoiles bleues récompensent les questions traitées. Les flammes jaunes reprennent les récompenses précédemment représentées par des étoiles rouges. Les compteurs sont associés au pseudo dans le navigateur utilisé.</p>
+        <h3>Ton pseudo et tes résultats</h3>""")
+      replace("Dans cette version, l’application n’envoie pas ces données à Grist ni aux auteurs.", """Si tu actives le partage des données dans les paramètres, des événements d’utilisation et des résultats associés à ton pseudo peuvent être transmis au dispositif de suivi du projet via n8n et Grist. Le territoire et le niveau sont transmis s’ils ont été renseignés. Tu peux désactiver les prochains envois dans les paramètres.""")
+      replace("Objectif Bac ne dépose pas de cookie publicitaire et n’intègre pas de mesure d’audience dans cette version. Le stockage local du navigateur sert à retrouver ton pseudo et tes résultats.","Objectif Bac ne dépose pas de cookie publicitaire. Le stockage local du navigateur sert à retrouver ton pseudo, tes résultats et tes récompenses.")
+      path.write_text(html,encoding="utf-8")
+      PY
+      python - <<'PY'
+      from pathlib import Path
+      test=Path("test-navigation.cjs")
+      source=test.read_text(encoding="utf-8")
+      mark="\n  } finally {"
+      assert source.count(mark)==1
+      test.write_text(source.replace(mark,"\n"+"    await page.evaluate(()=>{\n      const saved=JSON.parse(localStorage.getItem(KEY));\n      const pupil=saved.profiles.find(item=>item.id===saved.activeId);\n      const chapter=DATA.chapters.find(item=>item.domain==='comprendre');\n      const completed=DATA.questions.filter(q=>q.chapterIds.includes(chapter.id)&&q.domain==='comprendre');\n      const ids=new Set([...completed,...DATA.questions.slice(0,10)].map(q=>q.id));\n      pupil.progress=Object.fromEntries([...ids].map(id=>[id,{attempts:1,date:new Date().toISOString()}]));\n      pupil.activity52={days:{},total:0,red:{'guided:legacy':true}};\n      localStorage.setItem(KEY,JSON.stringify(saved));\n    });\n    await page.reload();\n    await page.waitForFunction(()=>Number(document.querySelector('#star-blue b').textContent)>=1\n      &&Number(document.querySelector('#star-red b').textContent)>=2);\n    console.log('Récompenses reconstruites et conservées');"+mark),encoding="utf-8")
+      PY
+    - |
+      python - public <<'PY'
+      from pathlib import Path
+      import sys
+
+      public = Path(sys.argv[1])
+      page = public / "index.html"
+      dashboard = public / "tableau-de-bord-grist.html"
+
+      def change(text, old, new):
+          assert text.count(old) == 1, old
+          return text.replace(old, new, 1)
+
+      s = page.read_text(encoding="utf8")
+      s = change(s, '<label><input id="dark-mode" type="checkbox"> Mode sombre</label>',
+          '<label class="audio-part" for="dark-mode"><input id="dark-mode" type="checkbox"><span style="color:var(--ink)">Mode sombre</span></label>')
+      s = change(s, '      <button id="reset-profile"', '      <button id="replay-tutorial" type="button">Revoir le tutoriel</button>\n      <button id="reset-profile"')
+      s = change(s, 'function startTutorial() {\n  if (profile().tutorialSeen || tutorial.open) return;',
+          'function startTutorial(replay=false) {\n  if ((!replay && profile().tutorialSeen) || tutorial.open) return;')
+      s = change(s, "$('#tutorial-skip').onclick = finishTutorial;", """$('#replay-tutorial').onclick = () => {
+        $('#administration').open = false;
+        startTutorial(true);
+      };
+      $('#tutorial-skip').onclick = finishTutorial;""")
+      s = change(s, "function mergeActivity52(pupil,previous){", """function preserveRewards(pupil, state) {
+        const key='objectif-bac.rewards.'+pupil.id;
+        try {
+          const backup=JSON.parse(localStorage.getItem(key)||'null');
+          if(Number.isSafeInteger(backup?.total))state.total=Math.max(state.total,backup.total);
+          for(const id of Array.isArray(backup?.flames)?backup.flames:[]) {
+            if(typeof id==='string'&&/^(chapter|guided|notion):/.test(id))state.red[id]=true;
+          }
+          const record=JSON.stringify({total:state.total,flames:Object.keys(state.red)});
+          if(localStorage.getItem(key)!==record)localStorage.setItem(key,record);
+        } catch {}
+        return state;
+      }
+      function mergeActivity52(pupil,previous){""")
+      s = change(s, "if(!previous?.days||!previous.red)return current;", "if(!previous?.days||!previous.red)return preserveRewards(pupil,current);")
+      s = change(s, "  return current;\n}\nfunction savedActivity52", "  return preserveRewards(pupil,current);\n}\nfunction savedActivity52")
+      s = change(s, "  state.rewardsReconciled=true;", "  state.rewardsReconciled=true;\n  preserveRewards(pupil,state);")
+      s = change(s, "for(const p of store.profiles)if(saved.has(p.id))mergeActivity52(p,saved.get(p.id));",
+          "for(const p of store.profiles)mergeActivity52(p,saved.get(p.id));")
+      splash_start = 'requestAnimationFrame(finishSplash);'
+      s = change(s, splash_start, 'setTimeout(finishSplash, Math.max(0, 1500 - (performance.now() - splashStartedAt)));')
+      s = change(s, '<div id="splash">', '<script>const splashStartedAt=performance.now();</script><div id="splash">')
+      s = change(s, '#splash img{', '#splash[hidden]{display:none}\n#splash img{clip-path:inset(2% 0);')
+      s = change(s, 'width="567" height="547"', 'width="512" height="512"')
+      s = change(s, 'href="v62.css"', 'href="v62.css?rev=calculator-681838"')
+      import json, re
+      from collections import Counter
+
+      def remove_math_cards(match):
+          data = json.loads(match[2])
+          questions = data['questions']
+          remaining = [q for q in questions if (q['domain'], q['kind']) != ('calculer', 'flash')]
+          assert len(questions) - len(remaining) == 90
+          assert Counter((q['domain'], q['kind']) for q in remaining) == {('calculer', 'qcm'): 910, ('comprendre', 'qcm'): 100}
+          for key in ('chapterIds', 'notionIds'):
+              assert {v for q in questions if q['domain'] == 'calculer' for v in q[key]} == {v for q in remaining if q['domain'] == 'calculer' for v in q[key]}
+          counts = Counter(q['collection'] for q in remaining if q['domain'] == 'calculer')
+          data['questions'] = remaining
+          data['status'] = 'Objectif Bac · 910 QCM de maths et 100 QCM sur les consignes.'
+          for collection in data['collections']:
+              collection['expectedCount'] = counts[collection['id']]
+              if collection['id'] == 'demonstrations':
+                  collection['name'] = 'Démonstrations · 30 preuves, 20 QCM'
+          return match[1] + json.dumps(data, ensure_ascii=False, separators=(',', ':')).replace('<', '\\u003c') + match[3]
+
+      s, matched = re.subn(r'(<script id="module-data"[^>]*>)(.*?)(</script>)', remove_math_cards, s, flags=re.S)
+      assert matched == 1
+      s = change(s, '1100 exercices de physique-chimie', '1 010 questions de physique-chimie')
+      s = change(s, '1 000 exercices de maths appliquées', '910 QCM de maths appliquées')
+      s = change(s, '1 000 exercices de maths : 300 de notions, 220 annales initiales, 200 QCM de chapitres, 50 questions de démonstrations', '910 QCM de maths : 240 de notions, 220 annales initiales, 200 QCM de chapitres, 20 questions de démonstrations')
+      page.write_text(s,encoding="utf8")
+      with (public / "v62.css").open("a", encoding="utf8") as css:
+          css.write("\n#calculator .keys > button{background:#edf3fc;color:#17324d;border-color:#a9c0dc}\n[data-dark] #calculator .keys > button{background:#22374a;color:#eff7ff;border-color:#597187}\n#calculator .keys > button:nth-child(18){background:#185c92;color:#fff;border-color:#4386bd}\n")
+
+      s = dashboard.read_text(encoding="utf8")
+      s = change(s, '<section><h2>Contributions du jour</h2>', """<section><details id="profile-history">
+      <summary><strong>Historique des profils</strong></summary>
+      <p>Cette synthèse couvre toute l’activité partagée et conservée dans Grist, y compris après la suppression d’un profil sur son appareil.</p>
+      <label>Profil <select id="history-user"></select></label>
+      <p id="history-summary" role="status"></p>
+      <div id="history-cards" class="cards"></div>
+      </details></section>
+      <section><h2>Contributions du jour</h2>""")
+      s = change(s, 'function renderLog(){', """const historyUser=el('history-user');
+      const historyDate=new Intl.DateTimeFormat('fr-FR',{timeZone:'America/Cayenne',dateStyle:'medium'});
+      function renderHistory(){
+       if(!data)return;
+       const [sessions,results,events,participants]=data;
+       const profiles=new Map();
+       function profile(id){
+         if(!id||/^test(?:[-_]|$)/i.test(String(id)))return null;
+         if(!profiles.has(id))profiles.set(id,{id,first:Infinity,last:0,visits:0,answers:0,correct:0,stars:0,flames:0});
+         return profiles.get(id);
+       }
+       function includeDate(p,value){
+         const time=stamp(value);
+         if(Number.isFinite(time)){p.first=Math.min(p.first,time);p.last=Math.max(p.last,time);}
+       }
+       const recordedEvents=unique(events,'event_id');
+       const assisted=new Set(recordedEvents.filter(e=>e.event_type==='assisted_success').map(e=>e.result_id).filter(Boolean));
+       for(const row of unique(sessions,'session_id')){
+         const p=profile(row.user_id);
+         if(p){p.visits++;includeDate(p,row.started_at);includeDate(p,row.ended_at);}
+       }
+       for(const row of unique(results,'result_id')){
+         const p=profile(row.user_id);
+         if(p){
+           includeDate(p,row.completed_at);
+           if(Number(row.score_max)===1&&row.score!=null){
+             p.answers++;
+             if(Number(row.score)===1||assisted.has(row.result_id))p.correct++;
+           }
+         }
+       }
+       for(const row of recordedEvents){
+         const p=profile(row.user_id);
+         if(p){
+           includeDate(p,row.occurred_at);
+           if(row.event_type==='star_earned'){
+             if(row.resource_id==='yellow')p.stars++;
+             if(row.resource_id==='red')p.flames++;
+           }
+         }
+       }
+       for(const row of participants){
+         const p=profile(row.user_id);
+         if(p){p.name=row.pseudo;includeDate(p,row.last_seen_at);}
+       }
+       const list=[...profiles.values()].sort((a,b)=>(a.name||'').localeCompare(b.name||'','fr')||a.first-b.first||String(a.id).localeCompare(String(b.id)));
+       const names=new Map();
+       for(const p of list)names.set(p.name,(names.get(p.name)||0)+1);
+       const positions=new Map();
+       const previous=historyUser.value;
+       historyUser.replaceChildren(new Option('Vue d’ensemble',''),...list.map(p=>{
+         const label=p.name||'Pseudo indisponible';
+         positions.set(p.name,(positions.get(p.name)||0)+1);
+         return new Option(label+(names.get(p.name)>1?' · profil '+positions.get(p.name):''),p.id);
+       }));
+       if(profiles.has(previous))historyUser.value=previous;
+       const chosen=profiles.get(historyUser.value);
+       const selected=chosen?[chosen]:list;
+       const sum=field=>selected.reduce((total,p)=>total+p[field],0);
+       el('history-summary').textContent=chosen
+         ? (Number.isFinite(chosen.first)?'Activité du '+historyDate.format(chosen.first)+' au '+historyDate.format(chosen.last)+'.':'Aucune date enregistrée.')
+         : list.length+' profil(s) dans l’historique.';
+       el('history-cards').innerHTML=[['Visites',sum('visits')],['Réponses',sum('answers')],['Réussite',sum('answers')?Math.round(100*sum('correct')/sum('answers'))+' %':'—'],['Étoiles bleues',sum('stars')],['Flammes jaunes',sum('flames')]]
+         .map(([label,value])=>'<div class="card">'+label+'<strong>'+value+'</strong></div>').join('');
+      }
+      historyUser.addEventListener('change',renderHistory);
+      function renderLog(){""")
+      s = change(s, '   render();\n   renderLog();','   render();\n   renderLog();\n   renderHistory();')
+      dashboard.write_text(s,encoding="utf8")
+      PY
+    - |
+      if [ -f cours-h5p.zip ]; then
+        python - <<'PY'
+      from io import BytesIO
+      from pathlib import Path
+      from zipfile import ZipFile
+      import json
+
+      public = Path('public')
+      with ZipFile('cours-h5p.zip') as archive:
+          reader = public / 'cours/lecteur.html'
+          reader.parent.mkdir(parents=True, exist_ok=True)
+          assert reader.is_file()
+          packages = sorted(n for n in archive.namelist() if n.endswith('/original.h5p'))
+          assert len(packages) == 20, 'Catalogue H5P incomplet'
+          for name in packages:
+              target = public / Path(name).parent
+              with ZipFile(BytesIO(archive.read(name))) as course:
+                  files = set(course.namelist())
+                  manifest = json.loads(course.read('h5p.json'))
+                  pending = [manifest]
+                  libraries = set()
+                  while pending:
+                      metadata = pending.pop()
+                      for kind in ('preloadedDependencies', 'dynamicDependencies'):
+                          for dep in metadata.get(kind, []):
+                              key = f"{dep['machineName']}-{dep['majorVersion']}.{dep['minorVersion']}"
+                              if key not in libraries:
+                                  libraries.add(key)
+                                  pending.append(json.loads(course.read(f'{key}/library.json')))
+                  for file in sorted(files):
+                      parts = file.split('/')
+                      if file == 'h5p.json' or parts[0] == 'content':
+                          course.extract(file, target)
+                      elif parts[0] in libraries and parts[-1] not in ('semantics.json', 'upgrades.js'):
+                          if 'language' not in parts or parts[-1] in ('fr.json', 'en.json'):
+                              course.extract(file, target)
+                  assert (target / 'content/content.json').is_file()
+
+      index = public / 'index.html'
+      html = index.read_text(encoding='utf-8')
+      old_link = "esc(course.packagePath)"
+      assert html.count(old_link) == 1
+      archive_url = 'https://forge.apps.education.fr/objectif-bac-physique-chimie/objectif-bac/-/blob/main/cours-h5p.zip'
+      html = html.replace(old_link, repr(archive_url)).replace('Télécharger le paquet H5P', 'Accéder à l’archive des 20 paquets H5P')
+      index.write_text(html, encoding='utf-8')
+      print('Taille du site:', sum(p.stat().st_size for p in public.rglob('*') if p.is_file()), 'octets')
+      PY
+      else
+        cp -R cours public/
+      fi
+      test -s public/cours/lecteur.html
+  artifacts:
+    paths:
+      - public/
+      - test-navigation.cjs
+    expire_in: 1 day
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+recette-navigateurs:
+  stage: test
+  image: mcr.microsoft.com/playwright:v1.62.1-noble
+  needs:
+    - preparer-pages
+  parallel:
+    matrix:
+      - OBJECTIF_ENGINE: chromium
+        OBJECTIF_DEVICE: ""
+      - OBJECTIF_ENGINE: firefox
+        OBJECTIF_DEVICE: ""
+      - OBJECTIF_ENGINE: chromium
+        OBJECTIF_DEVICE: "Pixel 7"
+      - OBJECTIF_ENGINE: webkit
+        OBJECTIF_DEVICE: "iPhone 13"
+  script:
+    - npm install --no-save --no-package-lock playwright@1.62.1
+    - OBJECTIF_DIR=public node test-navigation.cjs
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+deploy-pages:
+  stage: deploy
+  dependencies:
+    - preparer-pages
+  script:
+    - test -s public/index.html
+  pages:
+    publish: public
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+

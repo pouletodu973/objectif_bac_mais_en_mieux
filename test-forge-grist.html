@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="fr">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Objectif Bac · Test Forge vers Grist</title>
+<style>
+body{font:1rem system-ui;margin:3rem auto;padding:0 1.25rem;max-width:40rem;color:#182b3e}
+button{font:inherit;padding:.65rem 1rem} #status{overflow-wrap:anywhere}
+</style>
+<h1>Objectif Bac · Test de raccordement</h1>
+<p>Le test transmet uniquement un scénario fictif sous le pseudo TEST-OBJECTIF-BAC. Active d’abord l’écoute du webhook « Webhook aides fictives » dans n8n.</p>
+<button type="button" id="send">Envoyer le scénario fictif</button>
+<p id="status" role="status"></p>
+<script>
+const send = document.getElementById('send');
+const status = document.getElementById('status');
+let scenario;
+send.addEventListener('click', async () => {
+  if (!scenario) {
+    const now = Date.now();
+    const at = offset => new Date(now + offset * 1000).toISOString();
+    scenario = {
+      mode:'test', pseudo:'TEST-OBJECTIF-BAC', session_id:'TEST-V4-' + crypto.randomUUID(),
+      ended_at:at(0), events:[
+        {type:'visit_start', occurred_at:at(-20)},
+        {type:'answer', occurred_at:at(-15), correct:false, question_id:'TEST-QUESTION'},
+        {type:'hint_open', occurred_at:at(-12), resource_id:'TEST-QUESTION'},
+        {type:'sheet_open', occurred_at:at(-10), resource_id:'TEST-FICHE'},
+        {type:'h5p_open', occurred_at:at(-8), resource_id:'h5p-rc'},
+        {type:'assisted_success', occurred_at:at(-3)}
+      ]
+    };
+  }
+  send.disabled = true;
+  status.textContent = 'Envoi du scénario fictif…';
+  try {
+    const response = await fetch('https://n8n.incubateur.education.gouv.fr/webhook-test/objectif-bac-v4-aides-fictives', {
+      method:'POST', credentials:'omit', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(scenario), signal:AbortSignal.timeout(20000)
+    });
+    if (!response.ok) throw new Error('n8n a répondu avec le statut HTTP ' + response.status + '.');
+    const result = await response.json();
+    const row = Array.isArray(result) ? result[0] : result;
+    if (row?.session_id !== scenario.session_id || row?.event_type !== 'h5p_open' || row?.resource_id !== 'h5p-rc')
+      throw new Error('La réponse ne confirme pas l’écriture Grist de cette visite.');
+    status.textContent = 'Écriture Grist confirmée · ' + scenario.session_id;
+  } catch (error) {
+    status.textContent = 'Test non confirmé · ' + error.message;
+    send.disabled = false;
+  }
+});
+</script>
+</html>

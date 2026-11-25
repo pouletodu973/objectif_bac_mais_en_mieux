@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="fr">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Objectif Bac — Suivi enseignant</title>
+<script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+<style>
+body{font:15px system-ui,sans-serif;background:#f2f8f6;color:#15334e;margin:0;padding:clamp(12px,3vw,28px)}
+header,.cards{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between}
+.card,section{background:white;border:1px solid #d5e6e0;border-radius:16px;padding:16px}
+.card{flex:1 1 135px}.card strong{display:block;color:#086b63;font-size:1.9rem}section{margin-top:14px}
+table{width:100%;border-collapse:collapse}th,td{padding:.45rem;text-align:right;border-bottom:1px solid #e1eae6}th:first-child,td:first-child{text-align:left}.scroll{overflow:auto}
+button,select{font:inherit}caption{text-align:left;font-weight:700;margin:.5rem 0}progress{accent-color:#086b63;width:min(180px,100%)}
+</style>
+<header><h1>Suivi des révisions</h1><label>Période <select id="period"><option value="7">7 jours</option><option value="30">30 jours</option><option value="90">90 jours</option></select></label><button id="reload">Actualiser</button></header>
+<p id="status" role="status"></p>
+<div id="cards" class="cards"></div>
+<section><div class="scroll"><table><caption>Activité par jour · heure de Guyane</caption><thead><tr><th scope="col">Jour</th><th scope="col">Visites</th><th scope="col">Réponses</th><th scope="col">Réussites</th></tr></thead><tbody id="days"></tbody></table></div></section>
+<section><h2>Étoiles gagnées</h2><div id="star-totals" class="cards"></div></section><section><h2>Domaines et aides</h2><div id="domains"></div><p id="help"></p></section>
+<script>
+const el=id=>document.getElementById(id);
+let data;
+const dayMs=86400000;
+function stamp(value){
+ if(typeof value==='number')return value*1000;
+ if(Array.isArray(value)&&value[0]==='D')return Number(value[1])*1000;
+ return Date.parse(value);
+}
+function day(value){return Math.floor((stamp(value)-10800000)/dayMs)}
+function rows(cols){return (cols.id||[]).map((_,i)=>Object.fromEntries(Object.entries(cols).map(([key,col])=>[key,col[i]])))}
+function unique(records,key){
+ return [...new Map(records.filter(r=>r[key]&&!/^test(?:[-_]|$)/i.test(String(r[key])) && !/^test(?:[-_]|$)/i.test(String(r.user_id))).map(row=>[row[key],row])).values()];
+}
+function render(){
+ if(!data)return;
+ const [sessions,results,events]=data;
+ const today=day(Date.now()/1000),start=today-Number(el('period').value)+1;
+ const within=(records,key)=>records.filter(row=>day(row[key])>=start&&day(row[key])<=today);
+ const visits=within(unique(sessions,'session_id'),'started_at');
+ const answers=within(unique(results,'result_id'),'completed_at').filter(row=>Number(row.score_max)===1&&[0,1].includes(Number(row.score))&&row.score!==null);
+ const eventRows=unique(events,'event_id');
+ const activity=within(eventRows,'occurred_at');
+ const weekStart=today-((today+3)%7);
+ const date=new Date(today*dayMs);
+ const monthStart=Date.UTC(date.getUTCFullYear(),date.getUTCMonth(),1)/dayMs;
+ el('star-totals').innerHTML=[['Aujourd’hui',today],['Cette semaine',weekStart],['Ce mois',monthStart]].map(([label,start])=>{
+   const stars=eventRows.filter(r=>r.event_type==='star_earned'&&day(r.occurred_at)>=start&&day(r.occurred_at)<=today);
+   return '<div class="card">'+label+'<p>Jaunes : '+stars.filter(r=>r.resource_id==='yellow').length+' · Rouges : '+stars.filter(r=>r.resource_id==='red').length+'</p></div>';
+ }).join('');
+ const assisted=new Set(eventRows.filter(r=>r.event_type==='assisted_success'&&day(r.occurred_at)<=today).map(r=>r.result_id).filter(Boolean));
+ const nCorrect=list=>list.filter(r=>Number(r.score)===1||assisted.has(r.result_id)).length;
+ const percentage=list=>list.length?Math.round(nCorrect(list)/list.length*100)+' %':'—';
+ const durations=visits.map(r=>Number(r.duration_seconds)).filter(v=>Number.isFinite(v)&&v>0);
+ const average=durations.length?Math.round(durations.reduce((a,b)=>a+b,0)/durations.length):0;
+ el('status').textContent=visits.length||answers.length?'Les chiffres reflètent l’activité partagée par les élèves.':'Aucune activité reçue sur cette période.';
+ el('cards').innerHTML=[['Visites',visits.length],['Pseudos actifs',new Set([...visits,...answers].map(r=>r.user_id).filter(Boolean)).size],['Réussite',percentage(answers)],['Durée moyenne',durations.length?Math.floor(average/60)+' min '+average%60+' s':'—']].map(([label,value])=>'<div class="card">'+label+'<strong>'+value+'</strong></div>').join('');
+ const daily=[];
+ for(let d=today;d>=start;d--){
+   const v=visits.filter(r=>day(r.started_at)===d).length,a=answers.filter(r=>day(r.completed_at)===d);
+   daily.push('<tr><th scope="row">'+new Intl.DateTimeFormat('fr-FR',{timeZone:'UTC',day:'numeric',month:'short'}).format(d*dayMs)+'</th><td>'+v+'</td><td>'+a.length+'</td><td>'+nCorrect(a)+'</td></tr>');
+ }
+ el('days').innerHTML=daily.join('');
+ el('domains').innerHTML=[['comprendre','Comprendre les consignes'],['calculer','Maths appliquées']].map(([id,label])=>{
+   const list=answers.filter(r=>r.domain===id);
+   return '<p>'+label+' · '+nCorrect(list)+' / '+list.length+' · '+percentage(list)+(list.length?' <progress aria-label="'+label+'" max="'+list.length+'" value="'+nCorrect(list)+'"></progress>':'')+'</p>';
+ }).join('');
+ const count=(...types)=>activity.filter(r=>types.includes(r.event_type)).length;
+ const resource=type=>activity.filter(r=>r.event_type==='resource_open'&&r.resource_type===type).length;
+ el('help').textContent='Indices : '+(count('hint_open')+activity.filter(r=>r.event_type==='help_open'&&r.resource_type==='hint').length)+' · Fiches : '+(count('sheet_open')+resource('sheet'))+' · Cours H5P : '+(count('h5p_open')+resource('h5p'))+' · « J’ai réussi » : '+count('assisted_success');
+}
+async function update(){
+ el('status').textContent='Chargement…';
+ try{data=(await Promise.all(['Sessions','Resultats','Evenements'].map(name=>grist.docApi.fetchTable(name)))).map(rows);render();}
+ catch{el('status').textContent='Les tables ne sont pas lisibles avec les droits actuels du widget.';}
+}
+el('period').addEventListener('change',render);
+el('reload').addEventListener('click',update);
+if(window.grist){
+ grist.ready({requiredAccess:'full'});
+ grist.onOptions(update);
+ update();
+}else el('status').textContent='Ce tableau s’ouvre comme widget dans Grist.';
+</script>
+</html>
